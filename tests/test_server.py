@@ -1,14 +1,110 @@
+import httpx
 import pytest
 
-from ip_api_mcp.server import create_mcp_server
+from server import (
+    RateLimitExceeded,
+    RateLimiter,
+    fetch_ip_location,
+    lookup_ip_location,
+)
 
 
-class FakeLookupClient:
-    def __init__(self):
-        self.requests = []
+@pytest.mark.asyncio
+async def test_fetch_ip_location_uses_base_endpoint_and_normalizes_success_payload():
+    requests: list[httpx.Request] = []
 
-    async def lookup(self, ip_address=None):
-        self.requests.append(ip_address)
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "query": "203.0.113.10",
+                "country": "South Korea",
+                "city": "Seoul",
+                "isp": "Example ISP",
+                "lat": 37.5665,
+                "lon": 126.978,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await fetch_ip_location(client=client)
+
+    assert requests[0].url == "http://ip-api.com/json"
+    assert result == {
+        "query": "203.0.113.10",
+        "country": "South Korea",
+        "city": "Seoul",
+        "isp": "Example ISP",
+        "latitude": 37.5665,
+        "longitude": 126.978,
+        "source": "ip-api.com",
+    }
+
+
+@pytest.mark.asyncio
+async def test_fetch_ip_location_appends_specific_ip_to_endpoint():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "query": "8.8.8.8",
+                "country": "United States",
+                "city": "Ashburn",
+                "isp": "Google LLC",
+                "lat": 39.03,
+                "lon": -77.5,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await fetch_ip_location("8.8.8.8", client=client)
+
+    assert requests[0].url == "http://ip-api.com/json/8.8.8.8"
+    assert result["query"] == "8.8.8.8"
+    assert result["country"] == "United States"
+
+
+@pytest.mark.asyncio
+async def test_fetch_ip_location_rejects_invalid_ip_before_http_request():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="valid IPv4 or IPv6"):
+            await fetch_ip_location("not an ip", client=client)
+
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_ip_location_raises_clear_error_when_ip_api_reports_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": "fail",
+                "message": "private range",
+                "query": "192.168.0.1",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(RuntimeError, match="private range"):
+            await fetch_ip_location("192.168.0.1", client=client)
+
+
+@pytest.mark.asyncio
+async def test_lookup_ip_location_returns_user_friendly_payload(monkeypatch):
+    async def fake_fetch_ip_location(ip_address=None):
         return {
             "query": ip_address or "203.0.113.10",
             "country": "South Korea",
@@ -19,17 +115,39 @@ class FakeLookupClient:
             "source": "ip-api.com",
         }
 
+    monkeypatch.setattr("server.fetch_ip_location", fake_fetch_ip_location)
+
+    result = await lookup_ip_location("8.8.8.8")
+
+    assert result["message"] == "IP 8.8.8.8 위치는 South Korea, Seoul이며 ISP는 Example ISP입니다."
+    assert result["source"] == "ip-api.com"
+
 
 @pytest.mark.asyncio
-async def test_mcp_server_exposes_lookup_tool():
-    lookup_client = FakeLookupClient()
-    server = create_mcp_server(lookup_client=lookup_client)
+async def test_rate_limiter_blocks_calls_above_limit_inside_window():
+    current_time = 1_000.0
 
-    _, structured_result = await server.call_tool(
-        "lookup_ip_location",
-        {"ip_address": "8.8.8.8"},
-    )
+    def now():
+        return current_time
 
-    assert lookup_client.requests == ["8.8.8.8"]
-    assert structured_result["country"] == "South Korea"
-    assert structured_result["source"] == "ip-api.com"
+    limiter = RateLimiter(max_calls=2, window_seconds=60, clock=now)
+
+    await limiter.acquire()
+    await limiter.acquire()
+
+    with pytest.raises(RateLimitExceeded, match="2 calls per 60 seconds"):
+        await limiter.acquire()
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_allows_calls_after_window_expires():
+    current_time = 1_000.0
+
+    def now():
+        return current_time
+
+    limiter = RateLimiter(max_calls=1, window_seconds=60, clock=now)
+
+    await limiter.acquire()
+    current_time += 61
+    await limiter.acquire()
