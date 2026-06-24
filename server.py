@@ -76,6 +76,23 @@ def normalize_ip_address(ip_address: str | None) -> str | None:
         raise ValueError("ip_address must be a valid IPv4 or IPv6 address") from exc
 
 
+def extract_client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        first_forwarded_ip = forwarded_for.split(",", 1)[0].strip()
+        if first_forwarded_ip:
+            return first_forwarded_ip
+
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
+
+    if request.client and request.client.host:
+        return request.client.host
+
+    raise RuntimeError("Could not determine client IP address")
+
+
 async def fetch_ip_location(
     ip_address: str | None = None,
     client: httpx.AsyncClient | None = None,
@@ -135,6 +152,13 @@ async def lookup_ip_location(ip_address: str | None = None) -> dict[str, Any]:
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "ip-api-location"})
+
+
+@mcp.custom_route("/my-ip-location", methods=["GET"])
+async def my_ip_location(request: Request) -> JSONResponse:
+    client_ip = extract_client_ip(request)
+    result = await fetch_ip_location(client_ip)
+    return JSONResponse(result)
 
 
 def main() -> None:

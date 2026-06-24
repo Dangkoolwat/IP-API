@@ -13,6 +13,9 @@
   - 사용자에게 보여주기 좋은 한국어 `message`도 함께 반환합니다.
 - `GET /health`
   - 서버 상태 확인용 엔드포인트입니다.
+- `GET /my-ip-location`
+  - ChatGPT App UI iframe이나 브라우저에서 호출할 수 있는 엔드포인트입니다.
+  - `X-Forwarded-For`, `X-Real-IP`, request client 순서로 브라우저 요청 IP를 읽고 위치를 조회합니다.
 - `POST /mcp`
   - FastMCP HTTP transport 엔드포인트입니다.
 
@@ -47,6 +50,12 @@ http://localhost:8000/mcp
 
 ```bash
 curl http://localhost:8000/health
+```
+
+브라우저 요청 IP 기준 위치 확인:
+
+```bash
+curl http://localhost:8000/my-ip-location
 ```
 
 포트를 바꾸려면 `PORT` 환경 변수를 사용합니다.
@@ -123,6 +132,40 @@ PY
 {}
 ```
 
+## ChatGPT App 브라우저 IP 조회
+
+ChatGPT에서 MCP tool을 호출하면 요청 주체는 사용자의 브라우저가 아니라 ChatGPT/OpenAI 쪽 MCP 호출 인프라입니다. 그래서 `lookup_ip_location`에 빈 입력을 넘기면 실제 사용자 IP가 아니라 서버나 중간 인프라 기준 IP가 조회될 수 있습니다.
+
+사용자 브라우저의 공인 IP 기준 위치가 필요하면 ChatGPT App UI iframe 또는 일반 브라우저에서 아래 HTTP route를 직접 호출하세요.
+
+```text
+https://your-render-service.onrender.com/my-ip-location
+```
+
+브라우저 JavaScript 예시:
+
+```js
+const response = await fetch("https://your-render-service.onrender.com/my-ip-location");
+const location = await response.json();
+console.log(location);
+```
+
+응답 예시:
+
+```json
+{
+  "query": "203.0.113.10",
+  "country": "South Korea",
+  "city": "Seoul",
+  "isp": "Example ISP",
+  "latitude": 37.5665,
+  "longitude": 126.978,
+  "source": "ip-api.com"
+}
+```
+
+이 route는 프록시 환경에서 흔히 전달되는 `X-Forwarded-For` 헤더의 첫 번째 IP를 우선 사용합니다. 이 값은 지역 컨텍스트 표시에는 유용하지만, 인증이나 보안 차단 같은 중요한 판단에는 그대로 신뢰하지 마세요.
+
 ## 테스트
 
 ```bash
@@ -138,6 +181,8 @@ pytest -q
 - 잘못된 IP 입력 거부
 - `ip-api.com` 실패 응답 처리
 - FastMCP tool payload 생성
+- 브라우저 요청 IP 추출
+- `/my-ip-location` route 응답
 - 분당 호출 제한 처리
 
 ## 파일 구조

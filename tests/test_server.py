@@ -1,12 +1,31 @@
 import httpx
 import pytest
+from starlette.requests import Request
 
 from server import (
     RateLimitExceeded,
     RateLimiter,
+    extract_client_ip,
     fetch_ip_location,
     lookup_ip_location,
+    my_ip_location,
 )
+
+
+def make_request(headers=None, client=("198.51.100.20", 12345)) -> Request:
+    raw_headers = []
+    for name, value in (headers or {}).items():
+        raw_headers.append((name.lower().encode(), value.encode()))
+
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/my-ip-location",
+            "headers": raw_headers,
+            "client": client,
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -121,6 +140,51 @@ async def test_lookup_ip_location_returns_user_friendly_payload(monkeypatch):
 
     assert result["message"] == "IP 8.8.8.8 위치는 South Korea, Seoul이며 ISP는 Example ISP입니다."
     assert result["source"] == "ip-api.com"
+
+
+def test_extract_client_ip_prefers_first_x_forwarded_for_entry():
+    request = make_request(
+        headers={"x-forwarded-for": "203.0.113.10, 10.0.0.1, 10.0.0.2"},
+        client=("198.51.100.20", 12345),
+    )
+
+    assert extract_client_ip(request) == "203.0.113.10"
+
+
+def test_extract_client_ip_falls_back_to_request_client_host():
+    request = make_request(client=("198.51.100.20", 12345))
+
+    assert extract_client_ip(request) == "198.51.100.20"
+
+
+@pytest.mark.asyncio
+async def test_my_ip_location_uses_browser_request_ip(monkeypatch):
+    requested_ips = []
+
+    async def fake_fetch_ip_location(ip_address=None):
+        requested_ips.append(ip_address)
+        return {
+            "query": ip_address,
+            "country": "South Korea",
+            "city": "Seoul",
+            "isp": "Example ISP",
+            "latitude": 37.5665,
+            "longitude": 126.978,
+            "source": "ip-api.com",
+        }
+
+    monkeypatch.setattr("server.fetch_ip_location", fake_fetch_ip_location)
+    request = make_request(headers={"x-forwarded-for": "203.0.113.10, 10.0.0.1"})
+
+    response = await my_ip_location(request)
+
+    assert requested_ips == ["203.0.113.10"]
+    assert response.status_code == 200
+    assert response.body == (
+        b'{"query":"203.0.113.10","country":"South Korea","city":"Seoul",'
+        b'"isp":"Example ISP","latitude":37.5665,"longitude":126.978,'
+        b'"source":"ip-api.com"}'
+    )
 
 
 @pytest.mark.asyncio
